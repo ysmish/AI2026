@@ -10,17 +10,21 @@ _MOVE_DELTAS = {
     "RIGHT": (0, 1),
 }
 
+_SIZE = None  # Global constant for grid size (set during problem initialization)
+_WALLS = None
+_PLANT_INDEX = {}
+_TAP_INDEX = {}
+_ROBOT_CAPACITIES = None
 
 class WateringProblem(search.Problem):
     """Multi-robot watering problem with taps, plants, and walls."""
 
     def __init__(self, initial_data):
-        self._size = initial_data["Size"]
-        self._walls = frozenset(initial_data.get("Walls", set()))
+        global _SIZE, _WALLS, _ROBOT_CAPACITIES, _PLANT_INDEX, _TAP_INDEX
+        _SIZE = initial_data["Size"]  # Set global constant
+        _WALLS =  frozenset(initial_data.get("Walls", set()))
         self._plant_targets = dict(initial_data["Plants"])
-        self._robot_capacities = self._extract_robot_capacities(initial_data["Robots"])
-        self._tap_index = {}
-        self._plant_index = {}
+        _ROBOT_CAPACITIES = self._extract_robot_capacities(initial_data["Robots"])
 
         robot_states = self._build_robot_states(initial_data["Robots"])
         plant_states = self._build_plant_states(initial_data["Plants"])
@@ -42,21 +46,23 @@ class WateringProblem(search.Problem):
         )
 
     def _build_plant_states(self, plants_data):
+        global _PLANT_INDEX
         states = tuple(
             (r, c, 0)
             for (r, c) in sorted(plants_data.keys())
         )
-        self._plant_index = {
+        _PLANT_INDEX = {
             (r, c): idx for idx, (r, c, _) in enumerate(states)
         }
         return states
 
     def _build_tap_states(self, taps_data):
+        global _TAP_INDEX
         states = tuple(
             (r, c, remaining)
             for (r, c), remaining in sorted(taps_data.items())
         )
-        self._tap_index = {
+        _TAP_INDEX = {
             (r, c): idx for idx, (r, c, _) in enumerate(states)
         }
         return states
@@ -97,7 +103,7 @@ class WateringProblem(search.Problem):
             nr, nc = r + dr, c + dc
             if not self._in_bounds(nr, nc):
                 continue
-            if (nr, nc) in self._walls:
+            if (nr, nc) in _WALLS:
                 continue
             if (nr, nc) in occupied:
                 continue
@@ -111,7 +117,7 @@ class WateringProblem(search.Problem):
 
     def _get_load_successor(self, robot_states, plant_states, tap_states,
                             robot_index, robot_id, r, c, load):
-        tap_idx = self._tap_index.get((r, c))
+        tap_idx = _TAP_INDEX.get((r, c))
         if tap_idx is None:
             return []
 
@@ -119,7 +125,7 @@ class WateringProblem(search.Problem):
         if remaining <= 0:
             return []
 
-        capacity = self._robot_capacities[robot_id]
+        capacity = _ROBOT_CAPACITIES[robot_id]
         if load >= capacity:
             return []
 
@@ -137,7 +143,7 @@ class WateringProblem(search.Problem):
         if load <= 0:
             return []
 
-        plant_idx = self._plant_index.get((r, c))
+        plant_idx = _PLANT_INDEX.get((r, c))
         if plant_idx is None:
             return []
 
@@ -159,7 +165,7 @@ class WateringProblem(search.Problem):
         return data_tuple[:index] + (new_value,) + data_tuple[index + 1:]
 
     def _in_bounds(self, r, c):
-        rows, cols = self._size
+        rows, cols = _SIZE
         return 0 <= r < rows and 0 <= c < cols
 
     def goal_test(self, state):
