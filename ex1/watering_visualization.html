@@ -188,7 +188,7 @@
 <body>
   <div id="app">
     <div id="grid-container">
-      <div id="header">ext-plant-watering – problem_hard1</div>
+      <div id="header">ext-plant-watering – problem_hard1 (optimal: 31)</div>
       <div id="subheader">Grid view (rows 0–4, columns 0–5)</div>
       <div id="grid"></div>
     </div>
@@ -209,32 +209,28 @@
   </div>
 
   <script>
-    // ---------- Problem definition (from your instance) ----------
-
+    // ---------- Problem definition (problem_hard1) ----------
+    // optimal: 31
     const problemHard1 = {
       size: { rows: 5, cols: 6 },
-      // Walls are at these (row, col) coordinates
       walls: [
         [1, 2], [1, 3],
         [3, 2], [3, 3],
       ],
-      // Tap positions -> starting WU
       taps: {
         "2,2": 12
       },
-      // Plant positions -> required WU
       plants: {
         "0,1": 3,
         "4,5": 6
       },
-      // Robots: id -> (row, col, carried, capacity)
       robots: {
         "10": { row: 2, col: 1, carried: 0, cap: 6 },
         "11": { row: 2, col: 4, carried: 0, cap: 3 }
       }
     };
 
-    // Plan to execute
+    // Plan of 31 actions (one optimal solution)
     const plan = [
       'RIGHT{10}', 'LOAD{10}', 'LOAD{10}', 'LOAD{10}', 'LOAD{10}', 'LOAD{10}', 'LOAD{10}',
       'UP{11}',
@@ -247,7 +243,6 @@
     ];
 
     // ---------- State representation ----------
-
     function coordKey(r, c) {
       return r + "," + c;
     }
@@ -261,16 +256,11 @@
       });
 
       const tapsMap = {};
-      for (const pos in taps) {
-        tapsMap[pos] = taps[pos]; // remaining WU
-      }
+      for (const pos in taps) tapsMap[pos] = taps[pos];
 
       const plantsMap = {};
       for (const pos in plants) {
-        plantsMap[pos] = {
-          have: 0,
-          need: plants[pos]
-        };
+        plantsMap[pos] = { have: 0, need: plants[pos] };
       }
 
       const robotsMap = {};
@@ -298,14 +288,10 @@
     }
 
     // ---------- Action semantics ----------
-
     function parseAction(actionStr) {
       const m = actionStr.match(/^([A-Z]+)\{(\d+)\}$/i);
       if (!m) return null;
-      return {
-        type: m[1].toUpperCase(),
-        id: m[2]
-      };
+      return { type: m[1].toUpperCase(), id: m[2] };
     }
 
     function robotAt(state, row, col) {
@@ -317,9 +303,7 @@
     }
 
     function canMoveTo(state, row, col) {
-      if (row < 0 || row >= state.rows || col < 0 || col >= state.cols) {
-        return false;
-      }
+      if (row < 0 || row >= state.rows || col < 0 || col >= state.cols) return false;
       const key = coordKey(row, col);
       if (state.walls[key]) return false;
       if (robotAt(state, row, col)) return false;
@@ -329,7 +313,6 @@
     function applyAction(prevState, parsed) {
       const state = cloneState(prevState);
       if (!parsed) return state;
-
       const { type, id } = parsed;
       const robot = state.robots[id];
       if (!robot) {
@@ -338,17 +321,13 @@
       }
 
       if (type === "UP" || type === "DOWN" || type === "LEFT" || type === "RIGHT") {
-        let newRow = robot.row;
-        let newCol = robot.col;
-
+        let newRow = robot.row, newCol = robot.col;
         if (type === "UP") newRow--;
         if (type === "DOWN") newRow++;
         if (type === "LEFT") newCol--;
         if (type === "RIGHT") newCol++;
-
         if (canMoveTo(state, newRow, newCol)) {
-          robot.row = newRow;
-          robot.col = newCol;
+          robot.row = newRow; robot.col = newCol;
         } else {
           console.warn("Illegal move", type, "for robot", id, "– ignoring.");
         }
@@ -384,10 +363,9 @@
     }
 
     // ---------- Visualization ----------
-
     const initialState = createInitialState();
-    const history = [cloneState(initialState)]; // history[i] = state after i actions
-    let stepIndex = 0;                         // how many actions have been executed
+    const history = [cloneState(initialState)];
+    let stepIndex = 0;
 
     const gridEl = document.getElementById("grid");
     const actionsListEl = document.getElementById("actions-list");
@@ -413,8 +391,6 @@
     function renderGrid() {
       const state = history[stepIndex];
       const cells = gridEl.querySelectorAll(".cell");
-
-      // Pre-compute content per cell
       const cellContents = {};
 
       function addToCell(row, col, text) {
@@ -423,32 +399,28 @@
         cellContents[key].push(text);
       }
 
-      // Taps
       for (const pos in state.taps) {
         const [r, c] = pos.split(",").map(Number);
         addToCell(r, c, `Tap(${state.taps[pos]})`);
       }
 
-      // Plants
       for (const pos in state.plants) {
         const [r, c] = pos.split(",").map(Number);
         const p = state.plants[pos];
         addToCell(r, c, `Plant(${p.have}/${p.need})`);
       }
 
-      // Robots
       for (const id in state.robots) {
         const rbt = state.robots[id];
         addToCell(rbt.row, rbt.col, `R${id} (${rbt.carried}/${rbt.cap})`);
       }
 
-      // Fill each cell
       cells.forEach(cell => {
         const r = parseInt(cell.dataset.row, 10);
         const c = parseInt(cell.dataset.col, 10);
         const key = coordKey(r, c);
 
-        cell.className = "cell"; // reset classes
+        cell.className = "cell";
         cell.innerHTML = "";
 
         if (state.walls[key]) {
@@ -457,29 +429,17 @@
           return;
         }
 
-        if (state.taps.hasOwnProperty(key)) {
-          cell.classList.add("tap-cell");
-        }
-        if (state.plants.hasOwnProperty(key)) {
-          cell.classList.add("plant-cell");
-        }
+        if (state.taps.hasOwnProperty(key)) cell.classList.add("tap-cell");
+        if (state.plants.hasOwnProperty(key)) cell.classList.add("plant-cell");
 
-        // Robot presence handled by outline
         let hasRobot = false;
         for (const id in state.robots) {
           const rb = state.robots[id];
-          if (rb.row === r && rb.col === c) {
-            hasRobot = true;
-            break;
-          }
+          if (rb.row === r && rb.col === c) { hasRobot = true; break; }
         }
-        if (hasRobot) {
-          cell.classList.add("robot-cell");
-        }
+        if (hasRobot) cell.classList.add("robot-cell");
 
-        if (cellContents[key]) {
-          cell.innerHTML = cellContents[key].join("<br>");
-        }
+        if (cellContents[key]) cell.innerHTML = cellContents[key].join("<br>");
       });
     }
 
@@ -488,13 +448,8 @@
       for (let i = 0; i < plan.length; i++) {
         const li = document.createElement("li");
         li.textContent = plan[i];
-
-        if (i === stepIndex) {
-          li.classList.add("current");
-        } else if (i < stepIndex) {
-          li.classList.add("done");
-        }
-
+        if (i === stepIndex) li.classList.add("current");
+        else if (i < stepIndex) li.classList.add("done");
         actionsListEl.appendChild(li);
       }
     }
@@ -502,13 +457,8 @@
     function renderStateText() {
       const state = history[stepIndex];
       let text = "";
-
       text += `Step ${stepIndex} of ${plan.length}\n`;
-      if (stepIndex > 0) {
-        text += `Last action: ${plan[stepIndex - 1]}\n`;
-      } else {
-        text += `Last action: (none)\n`;
-      }
+      text += (stepIndex > 0) ? `Last action: ${plan[stepIndex - 1]}\n` : `Last action: (none)\n`;
 
       text += "\nRobots:\n";
       const ids = Object.keys(state.robots).sort((a, b) => parseInt(a) - parseInt(b));
@@ -518,9 +468,7 @@
       }
 
       text += "\nTaps (remaining WU):\n";
-      for (const pos in state.taps) {
-        text += `  Tap at (${pos}) = ${state.taps[pos]} WU\n`;
-      }
+      for (const pos in state.taps) text += `  Tap at (${pos}) = ${state.taps[pos]} WU\n`;
 
       text += "\nPlants (filled / required):\n";
       for (const pos in state.plants) {
@@ -543,13 +491,8 @@
       updateButtons();
     }
 
-    // ---------- Controls ----------
-
     function stepForward() {
       if (stepIndex >= plan.length) return;
-
-      // If we already computed this state in history (from a previous forward),
-      // just reuse it.
       if (history[stepIndex + 1]) {
         stepIndex++;
       } else {
@@ -580,7 +523,6 @@
     btnReset.addEventListener("click", reset);
 
     // ---------- Init ----------
-
     buildGrid(initialState.rows, initialState.cols);
     renderAll();
   </script>
