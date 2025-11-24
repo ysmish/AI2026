@@ -1,5 +1,5 @@
+#!/usr/bin/env python3
 import time
-
 import ex1
 import search
 
@@ -517,7 +517,7 @@ problem_12x12_snake_hard = {
 
 def main():
     start = time.time()
-    problem = [problem_12x12_snake_hard]
+    problem = [problem_hard5]
     for p in problem:
         for a in ['astar','gbfs']:
             solve_problems(p, a)
