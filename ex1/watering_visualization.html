@@ -214,19 +214,20 @@
     const problemHard1 = {
       size: { rows: 5, cols: 6 },
       walls: [
-        [1, 2], [1, 3],
-        [3, 2], [3, 3],
+        [0, 2], [0, 3],
+        [2, 2], [2, 3],
       ],
       taps: {
-        "2,2": 12
+        "1,2": 8,
+        "3,3": 8
       },
       plants: {
-        "0,1": 3,
-        "4,5": 6
+        "0,0": 4,
+        "4,5": 4
       },
       robots: {
-        "10": { row: 2, col: 1, carried: 0, cap: 6 },
-        "11": { row: 2, col: 4, carried: 0, cap: 3 }
+        "10": { row: 1, col: 1, carried: 0, cap: 4 },
+        "11": { row: 3, col: 4, carried: 0, cap: 3 }
       }
     };
 
@@ -528,3 +529,4 @@
   </script>
 </body>
 </html>
+
