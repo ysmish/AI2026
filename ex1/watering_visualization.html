@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ext-Plant-Watering Visualization</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #121212;
+      color: #f0f0f0;
+    }
+
+    #app {
+      display: flex;
+      height: 100vh;
+      box-sizing: border-box;
+      padding: 16px;
+      gap: 16px;
+    }
+
+    #grid-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #grid {
+      display: grid;
+      gap: 2px;
+      background: #222;
+      padding: 8px;
+      border-radius: 8px;
+      box-shadow: 0 0 12px rgba(0,0,0,0.6);
+    }
+
+    .cell {
+      width: 80px;
+      height: 80px;
+      border-radius: 6px;
+      border: 1px solid #444;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-size: 11px;
+      line-height: 1.2;
+      padding: 2px;
+      background: #181818;
+    }
+
+    .wall {
+      background: #333;
+      color: #ddd;
+      font-weight: bold;
+    }
+
+    .tap-cell {
+      background: #004d40;
+      border-color: #00bfa5;
+    }
+
+    .plant-cell {
+      background: #2e7d32;
+      border-color: #66bb6a;
+    }
+
+    .robot-cell {
+      outline: 2px solid #ffca28;
+      outline-offset: -2px;
+      font-weight: 600;
+    }
+
+    #sidebar {
+      width: 320px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: #1e1e1e;
+      padding: 12px;
+      border-radius: 10px;
+      box-shadow: 0 0 12px rgba(0,0,0,0.7);
+      box-sizing: border-box;
+    }
+
+    #sidebar h2 {
+      margin: 0 0 4px;
+      font-size: 18px;
+    }
+
+    #sidebar h3 {
+      margin: 8px 0 4px;
+      font-size: 14px;
+      opacity: 0.9;
+    }
+
+    #actions-list {
+      list-style: decimal;
+      padding-left: 24px;
+      margin: 0;
+      max-height: 260px;
+      overflow-y: auto;
+      border-radius: 6px;
+      background: #121212;
+      border: 1px solid #333;
+    }
+
+    #actions-list li {
+      padding: 4px 6px;
+      cursor: default;
+      font-size: 13px;
+    }
+
+    #actions-list li.current {
+      background: #ffca28;
+      color: #222;
+      font-weight: 700;
+    }
+
+    #actions-list li.done {
+      color: #888;
+    }
+
+    .buttons {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    button {
+      flex: 1;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      background: #424242;
+      color: #f5f5f5;
+      transition: background 0.15s, transform 0.1s;
+    }
+
+    button:hover:not(:disabled) {
+      background: #616161;
+      transform: translateY(-1px);
+    }
+
+    button:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    #state-text {
+      background: #121212;
+      border-radius: 6px;
+      border: 1px solid #333;
+      padding: 6px;
+      font-family: "Cascadia Code", "Fira Code", monospace;
+      font-size: 11px;
+      max-height: 220px;
+      overflow-y: auto;
+      white-space: pre;
+    }
+
+    #header {
+      text-align: center;
+      margin-bottom: 8px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    #subheader {
+      text-align: center;
+      font-size: 12px;
+      opacity: 0.8;
+      margin-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="grid-container">
+      <div id="header">ext-plant-watering – problem_hard1</div>
+      <div id="subheader">Grid view (rows 0–4, columns 0–5)</div>
+      <div id="grid"></div>
+    </div>
+
+    <div id="sidebar">
+      <h2>Plan actions</h2>
+      <ol id="actions-list"></ol>
+
+      <div class="buttons">
+        <button id="step-back">⬅️ Back</button>
+        <button id="step-forward">Forward ➡️</button>
+        <button id="reset">⟳ Reset</button>
+      </div>
+
+      <h3>State info</h3>
+      <pre id="state-text"></pre>
+    </div>
+  </div>
+
+  <script>
+    // ---------- Problem definition (from your instance) ----------
+
+    const problemHard1 = {
+      size: { rows: 5, cols: 6 },
+      // Walls are at these (row, col) coordinates
+      walls: [
+        [1, 2], [1, 3],
+        [3, 2], [3, 3],
+      ],
+      // Tap positions -> starting WU
+      taps: {
+        "2,2": 12
+      },
+      // Plant positions -> required WU
+      plants: {
+        "0,1": 3,
+        "4,5": 6
+      },
+      // Robots: id -> (row, col, carried, capacity)
+      robots: {
+        "10": { row: 2, col: 1, carried: 0, cap: 6 },
+        "11": { row: 2, col: 4, carried: 0, cap: 3 }
+      }
+    };
+
+    // Plan to execute
+    const plan = [
+      'RIGHT{10}', 'LOAD{10}', 'LOAD{10}', 'LOAD{10}', 'LOAD{10}', 'LOAD{10}', 'LOAD{10}',
+      'UP{11}',
+      'RIGHT{10}', 'RIGHT{10}', 'DOWN{10}', 'DOWN{10}', 'RIGHT{10}',
+      'POUR{10}', 'POUR{10}', 'POUR{10}', 'POUR{10}', 'POUR{10}', 'POUR{10}',
+      'DOWN{11}', 'LEFT{11}', 'LEFT{11}',
+      'LOAD{11}', 'LOAD{11}', 'LOAD{11}',
+      'LEFT{11}', 'UP{11}', 'UP{11}',
+      'POUR{11}', 'POUR{11}', 'POUR{11}'
+    ];
+
+    // ---------- State representation ----------
+
+    function coordKey(r, c) {
+      return r + "," + c;
+    }
+
+    function createInitialState() {
+      const { size, walls, taps, plants, robots } = problemHard1;
+
+      const wallsMap = {};
+      walls.forEach(([r, c]) => {
+        wallsMap[coordKey(r, c)] = true;
+      });
+
+      const tapsMap = {};
+      for (const pos in taps) {
+        tapsMap[pos] = taps[pos]; // remaining WU
+      }
+
+      const plantsMap = {};
+      for (const pos in plants) {
+        plantsMap[pos] = {
+          have: 0,
+          need: plants[pos]
+        };
+      }
+
+      const robotsMap = {};
+      for (const id in robots) {
+        robotsMap[id] = {
+          row: robots[id].row,
+          col: robots[id].col,
+          carried: robots[id].carried,
+          cap: robots[id].cap
+        };
+      }
+
+      return {
+        rows: size.rows,
+        cols: size.cols,
+        walls: wallsMap,
+        taps: tapsMap,
+        plants: plantsMap,
+        robots: robotsMap
+      };
+    }
+
+    function cloneState(state) {
+      return JSON.parse(JSON.stringify(state));
+    }
+
+    // ---------- Action semantics ----------
+
+    function parseAction(actionStr) {
+      const m = actionStr.match(/^([A-Z]+)\{(\d+)\}$/i);
+      if (!m) return null;
+      return {
+        type: m[1].toUpperCase(),
+        id: m[2]
+      };
+    }
+
+    function robotAt(state, row, col) {
+      for (const id in state.robots) {
+        const r = state.robots[id];
+        if (r.row === row && r.col === col) return true;
+      }
+      return false;
+    }
+
+    function canMoveTo(state, row, col) {
+      if (row < 0 || row >= state.rows || col < 0 || col >= state.cols) {
+        return false;
+      }
+      const key = coordKey(row, col);
+      if (state.walls[key]) return false;
+      if (robotAt(state, row, col)) return false;
+      return true;
+    }
+
+    function applyAction(prevState, parsed) {
+      const state = cloneState(prevState);
+      if (!parsed) return state;
+
+      const { type, id } = parsed;
+      const robot = state.robots[id];
+      if (!robot) {
+        console.warn("Unknown robot id in action:", parsed);
+        return state;
+      }
+
+      if (type === "UP" || type === "DOWN" || type === "LEFT" || type === "RIGHT") {
+        let newRow = robot.row;
+        let newCol = robot.col;
+
+        if (type === "UP") newRow--;
+        if (type === "DOWN") newRow++;
+        if (type === "LEFT") newCol--;
+        if (type === "RIGHT") newCol++;
+
+        if (canMoveTo(state, newRow, newCol)) {
+          robot.row = newRow;
+          robot.col = newCol;
+        } else {
+          console.warn("Illegal move", type, "for robot", id, "– ignoring.");
+        }
+        return state;
+      }
+
+      if (type === "LOAD") {
+        const key = coordKey(robot.row, robot.col);
+        const tapUnits = state.taps[key];
+        if (tapUnits !== undefined && tapUnits > 0 && robot.carried < robot.cap) {
+          robot.carried += 1;
+          state.taps[key] -= 1;
+        } else {
+          console.warn("LOAD failed at", key, "for robot", id);
+        }
+        return state;
+      }
+
+      if (type === "POUR") {
+        const key = coordKey(robot.row, robot.col);
+        const plant = state.plants[key];
+        if (plant && robot.carried > 0) {
+          robot.carried -= 1;
+          plant.have += 1;
+        } else {
+          console.warn("POUR failed at", key, "for robot", id);
+        }
+        return state;
+      }
+
+      console.warn("Unknown action type:", type);
+      return state;
+    }
+
+    // ---------- Visualization ----------
+
+    const initialState = createInitialState();
+    const history = [cloneState(initialState)]; // history[i] = state after i actions
+    let stepIndex = 0;                         // how many actions have been executed
+
+    const gridEl = document.getElementById("grid");
+    const actionsListEl = document.getElementById("actions-list");
+    const stateTextEl = document.getElementById("state-text");
+    const btnBack = document.getElementById("step-back");
+    const btnForward = document.getElementById("step-forward");
+    const btnReset = document.getElementById("reset");
+
+    function buildGrid(rows, cols) {
+      gridEl.style.gridTemplateColumns = `repeat(${cols}, 80px)`;
+      gridEl.innerHTML = "";
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const cell = document.createElement("div");
+          cell.className = "cell";
+          cell.dataset.row = r;
+          cell.dataset.col = c;
+          gridEl.appendChild(cell);
+        }
+      }
+    }
+
+    function renderGrid() {
+      const state = history[stepIndex];
+      const cells = gridEl.querySelectorAll(".cell");
+
+      // Pre-compute content per cell
+      const cellContents = {};
+
+      function addToCell(row, col, text) {
+        const key = coordKey(row, col);
+        if (!cellContents[key]) cellContents[key] = [];
+        cellContents[key].push(text);
+      }
+
+      // Taps
+      for (const pos in state.taps) {
+        const [r, c] = pos.split(",").map(Number);
+        addToCell(r, c, `Tap(${state.taps[pos]})`);
+      }
+
+      // Plants
+      for (const pos in state.plants) {
+        const [r, c] = pos.split(",").map(Number);
+        const p = state.plants[pos];
+        addToCell(r, c, `Plant(${p.have}/${p.need})`);
+      }
+
+      // Robots
+      for (const id in state.robots) {
+        const rbt = state.robots[id];
+        addToCell(rbt.row, rbt.col, `R${id} (${rbt.carried}/${rbt.cap})`);
+      }
+
+      // Fill each cell
+      cells.forEach(cell => {
+        const r = parseInt(cell.dataset.row, 10);
+        const c = parseInt(cell.dataset.col, 10);
+        const key = coordKey(r, c);
+
+        cell.className = "cell"; // reset classes
+        cell.innerHTML = "";
+
+        if (state.walls[key]) {
+          cell.classList.add("wall");
+          cell.textContent = "WALL";
+          return;
+        }
+
+        if (state.taps.hasOwnProperty(key)) {
+          cell.classList.add("tap-cell");
+        }
+        if (state.plants.hasOwnProperty(key)) {
+          cell.classList.add("plant-cell");
+        }
+
+        // Robot presence handled by outline
+        let hasRobot = false;
+        for (const id in state.robots) {
+          const rb = state.robots[id];
+          if (rb.row === r && rb.col === c) {
+            hasRobot = true;
+            break;
+          }
+        }
+        if (hasRobot) {
+          cell.classList.add("robot-cell");
+        }
+
+        if (cellContents[key]) {
+          cell.innerHTML = cellContents[key].join("<br>");
+        }
+      });
+    }
+
+    function renderActions() {
+      actionsListEl.innerHTML = "";
+      for (let i = 0; i < plan.length; i++) {
+        const li = document.createElement("li");
+        li.textContent = plan[i];
+
+        if (i === stepIndex) {
+          li.classList.add("current");
+        } else if (i < stepIndex) {
+          li.classList.add("done");
+        }
+
+        actionsListEl.appendChild(li);
+      }
+    }
+
+    function renderStateText() {
+      const state = history[stepIndex];
+      let text = "";
+
+      text += `Step ${stepIndex} of ${plan.length}\n`;
+      if (stepIndex > 0) {
+        text += `Last action: ${plan[stepIndex - 1]}\n`;
+      } else {
+        text += `Last action: (none)\n`;
+      }
+
+      text += "\nRobots:\n";
+      const ids = Object.keys(state.robots).sort((a, b) => parseInt(a) - parseInt(b));
+      for (const id of ids) {
+        const r = state.robots[id];
+        text += `  R${id} at (${r.row},${r.col}), water ${r.carried}/${r.cap}\n`;
+      }
+
+      text += "\nTaps (remaining WU):\n";
+      for (const pos in state.taps) {
+        text += `  Tap at (${pos}) = ${state.taps[pos]} WU\n`;
+      }
+
+      text += "\nPlants (filled / required):\n";
+      for (const pos in state.plants) {
+        const p = state.plants[pos];
+        text += `  Plant at (${pos}) = ${p.have} / ${p.need}\n`;
+      }
+
+      stateTextEl.textContent = text;
+    }
+
+    function updateButtons() {
+      btnBack.disabled = (stepIndex === 0);
+      btnForward.disabled = (stepIndex === plan.length);
+    }
+
+    function renderAll() {
+      renderGrid();
+      renderActions();
+      renderStateText();
+      updateButtons();
+    }
+
+    // ---------- Controls ----------
+
+    function stepForward() {
+      if (stepIndex >= plan.length) return;
+
+      // If we already computed this state in history (from a previous forward),
+      // just reuse it.
+      if (history[stepIndex + 1]) {
+        stepIndex++;
+      } else {
+        const prevState = history[stepIndex];
+        const parsed = parseAction(plan[stepIndex]);
+        const newState = applyAction(prevState, parsed);
+        history.push(newState);
+        stepIndex++;
+      }
+      renderAll();
+    }
+
+    function stepBack() {
+      if (stepIndex === 0) return;
+      stepIndex--;
+      renderAll();
+    }
+
+    function reset() {
+      stepIndex = 0;
+      history.length = 1;
+      history[0] = cloneState(initialState);
+      renderAll();
+    }
+
+    btnForward.addEventListener("click", stepForward);
+    btnBack.addEventListener("click", stepBack);
+    btnReset.addEventListener("click", reset);
+
+    // ---------- Init ----------
+
+    buildGrid(initialState.rows, initialState.cols);
+    renderAll();
+  </script>
+</body>
+</html>
