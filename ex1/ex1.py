@@ -17,27 +17,56 @@ class WateringProblem(search.Problem):
     def __init__(self, initial):
         """ Constructor only needs the initial state. """
         # 1. Store "Static" map data in self. 
-        # These are calculated ONCE per problem instance and valid for the whole search.
         self.size = initial["Size"]
         self.walls = frozenset(initial.get("Walls", set()))
         self.plants_targets = dict(initial["Plants"])
         self.robots_capacities = self._extract_robot_capacities(initial["Robots"])
         
-        # Pre-calculating sorted tuples for consistent indexing
+        # Sorted tuples for consistent indexing
         self.plant_positions = tuple(sorted(frozenset(initial["Plants"].keys())))
         self.tap_positions = tuple(sorted(frozenset(initial["Taps"].keys())))
 
+        # --- PRE-CALCULATION FOR HEURISTIC ---
+        # Calculate full BFS distance map for every plant to every VALID cell.
+        self.plant_bfs_maps = {}
+        for p_pos in self.plant_positions:
+            self.plant_bfs_maps[p_pos] = self._bfs_map(p_pos)
+        
         # 2. Initialize dynamic values.
         robot_states = self._build_robot_states(initial["Robots"])
         plant_states = self._build_plant_states(initial["Plants"])
         tap_states = self._build_tap_states(initial["Taps"])
         
-        # Calculate total water needed globally (Sum of all targets)
+        # Calculate total water needed globally
         total_remaining = sum(initial["Plants"].values())
 
         # State is: (robot_states, plant_states, tap_states, total_remaining)
         initial_state = (robot_states, plant_states, tap_states, total_remaining)
         search.Problem.__init__(self, initial_state)
+
+    def _bfs_map(self, start_pos):
+        """Runs BFS to find shortest path from start_pos to all NON-WALL cells."""
+        queue = [(start_pos, 0)]
+        distances = {start_pos: 0}
+        visited = {start_pos}
+        
+        idx = 0
+        while idx < len(queue):
+            (r, c), dist = queue[idx]
+            idx += 1
+            
+            for dr, dc in _MOVES.values():
+                nr, nc = r + dr, c + dc
+                
+                # Bounds check
+                if 0 <= nr < self.size[0] and 0 <= nc < self.size[1]:
+                    # STRICT CHECK: Only process if NOT a wall
+                    if (nr, nc) not in self.walls and (nr, nc) not in visited:
+                        visited.add((nr, nc))
+                        new_dist = dist + 1
+                        distances[(nr, nc)] = new_dist
+                        queue.append(((nr, nc), new_dist))
+        return distances
 
     @staticmethod
     def _extract_robot_capacities(robots_data):
@@ -47,26 +76,23 @@ class WateringProblem(search.Problem):
         }
 
     def _build_robot_states(self, robots_data):
-        # frozenset of (robot_id, r, c, load)
         return frozenset(
             (robot_id, r, c, load)
             for robot_id, (r, c, load, _) in sorted(robots_data.items())
         )
 
     def _build_plant_states(self, plants_data):
-        # store only the poured amounts in a fixed order based on self.plant_positions
         return tuple(0 for _ in self.plant_positions)
 
     def _build_tap_states(self, taps_data):
-        # store tap remaining amounts in a fixed order based on self.tap_positions
         return tuple(taps_data.get(pos, 0) for pos in self.tap_positions)
 
     def successor(self, state):
-        """ Generates the successor states returns [(action, achieved_state, ...)]"""
         robot_states, plant_states, tap_states, total_remaining = state
         successors = []
 
-        for robot_entry in robot_states:
+        # Sort for deterministic expansion
+        for robot_entry in sorted(robot_states):
             robot_id, r, c, load = robot_entry
 
             successors.extend(
@@ -88,9 +114,7 @@ class WateringProblem(search.Problem):
 
     def _get_movement_successors(self, robot_states, plant_states, tap_states, total_remaining,
                                  robot_entry, robot_id, r, c, load):
-        """Generate movement successors for one robot."""
         successors = []
-
         occupied = {
             (robot_r, robot_c)
             for (rid, robot_r, robot_c, _) in robot_states
@@ -100,20 +124,14 @@ class WateringProblem(search.Problem):
         for action_name, (dr, dc) in _MOVES.items():
             nr, nc = r + dr, c + dc
 
-            # Bounds check using self.size
             if not (0 <= nr < self.size[0] and 0 <= nc < self.size[1]): continue
-            
-            # Wall check using self.walls
             if (nr, nc) in self.walls: continue
-            
-            # Robot collision check
             if (nr, nc) in occupied: continue
 
             old_robot_entry = robot_entry
             new_robot_entry = (robot_id, nr, nc, load)
             new_robot_states = (robot_states - {old_robot_entry}) | {new_robot_entry}
             
-            # Movement does not change total_remaining
             new_state = (new_robot_states, plant_states, tap_states, total_remaining)
             successors.append(((robot_id, action_name), new_state))
 
@@ -121,8 +139,6 @@ class WateringProblem(search.Problem):
 
     def _get_load_successor(self, robot_states, plant_states, tap_states, total_remaining,
                              robot_entry, robot_id, r, c, load):
-        """Generate a LOAD successor."""
-        # Use self.tap_positions
         if (r, c) not in self.tap_positions: return []
 
         try:
@@ -132,7 +148,6 @@ class WateringProblem(search.Problem):
         remaining_tap = tap_states[tidx]
         if remaining_tap <= 0: return []
 
-        # Use self.robots_capacities
         capacity = self.robots_capacities.get(robot_id, 0)
         if load >= capacity: return []
 
@@ -150,10 +165,7 @@ class WateringProblem(search.Problem):
 
     def _get_pour_successor(self, robot_states, plant_states, tap_states, total_remaining,
                              robot_entry, robot_id, r, c, load):
-        """Generate a POUR successor."""
         if load <= 0: return []
-        
-        # Use self.plant_positions
         if (r, c) not in self.plant_positions: return []
 
         try:
@@ -161,8 +173,6 @@ class WateringProblem(search.Problem):
         except ValueError: return []
 
         poured = plant_states[pidx]
-        
-        # Use self.plants_targets
         target = self.plants_targets.get((r, c), 0)
         
         if poured >= target: return []
@@ -177,52 +187,117 @@ class WateringProblem(search.Problem):
         )
 
         new_total_remaining = total_remaining - 1
-        
         new_state = (new_robot_states, new_plant_states, tap_states, new_total_remaining)
         return [((robot_id, "POUR"), new_state)]
 
     def goal_test(self, state):
-        """Return True iff every plant has received its target amount."""
         return state[3] == 0
 
     def h_astar(self, node):
-        """A* admissible heuristic: 2*remaining_water - carried_by_robots (non-negative)."""
+        """
+        MST Heuristic with STRONG RELAXATION:
+        1. Vertices: All Robots + UNSATISFIED Plants.
+        2. Edges: 
+           - Robot-Robot: 0
+           - Robot-Plant & Plant-Plant: BFS_Distance // 2
+        3. Formula: MST_Weight.
+        
+        Dividing distances by 2 is a very safe admissibility guarantee.
+        """
         state = node.state
-        robot_states, _, _, total_remaining = state
+        robot_states, plant_states, _, _ = state
         
-        remaining = total_remaining
-        carried = sum(load for (_, _, _, load) in robot_states)
+        # 1. Identify Vertices
+        robot_positions = [(r, c) for (_, r, c, _) in sorted(robot_states)]
         
-        # Admissible logic: we must at least load and pour every remaining unit,
-        # minus what we are already carrying.
-        h = 2 * remaining - carried
-        return max(0, h)
+        unsatisfied_plants = []
+        for i, pos in enumerate(self.plant_positions):
+            if plant_states[i] < self.plants_targets.get(pos, 0):
+                unsatisfied_plants.append(pos)
+        
+        if not unsatisfied_plants:
+            return 0
+
+        # 2. Build MST using Prim's Algorithm
+        num_robots = len(robot_positions)
+        num_plants = len(unsatisfied_plants)
+        total_vertices = num_robots + num_plants
+        
+        visited = [False] * total_vertices
+        min_dists = [float('inf')] * total_vertices
+        
+        # Start with the first robot
+        min_dists[0] = 0
+        mst_weight = 0
+        
+        for _ in range(total_vertices):
+            # Find unvisited vertex with smallest min_dist
+            u = -1
+            min_val = float('inf')
+            
+            for i in range(total_vertices):
+                if not visited[i] and min_dists[i] < min_val:
+                    min_val = min_dists[i]
+                    u = i
+            
+            if u == -1 or min_val == float('inf'):
+                break
+                
+            visited[u] = True
+            mst_weight += min_val
+            
+            # Determine coordinate of u
+            pos_u = None
+            is_robot_u = (u < num_robots)
+            if is_robot_u:
+                pos_u = robot_positions[u]
+            else:
+                pos_u = unsatisfied_plants[u - num_robots]
+            
+            # Update neighbors (v)
+            for v in range(total_vertices):
+                if not visited[v]:
+                    weight = float('inf')
+                    is_robot_v = (v < num_robots)
+                    
+                    if is_robot_u and is_robot_v:
+                        weight = 0
+                    else:
+                        pos_v = robot_positions[v] if is_robot_v else unsatisfied_plants[v - num_robots]
+                        
+                        raw_dist = float('inf')
+                        if not is_robot_u:
+                            raw_dist = self.plant_bfs_maps[pos_u].get(pos_v, float('inf'))
+                        elif not is_robot_v:
+                            raw_dist = self.plant_bfs_maps[pos_v].get(pos_u, float('inf'))
+                        
+                        # STRONG RELAXATION: Divide distance by 2
+                        if raw_dist != float('inf'):
+                            weight = raw_dist // 2
+                            
+                    if weight < min_dists[v]:
+                        min_dists[v] = weight
+
+        return mst_weight
 
     def h_gbfs(self, node):
-        """Greedy heuristic."""
         state = node.state
         robot_states, plant_states, _, total_remaining = state
         
         remaining = total_remaining
-        
-        if remaining == 0:
-            return 0
+        if remaining == 0: return 0
 
-        # Calculate distance to unsatisfied plants
         unsatisfied = [
             pos
             for i, pos in enumerate(self.plant_positions)
             if plant_states[i] < self.plants_targets.get(pos, 0)
         ]
 
-        if not unsatisfied:
-            return remaining
+        if not unsatisfied: return remaining
 
         robot_positions = [(rr, rc) for (_, rr, rc, _) in robot_states]
-        if not robot_positions:
-            return remaining
+        if not robot_positions: return remaining
 
-        # Find minimum Manhattan distance from any robot to any unsatisfied plant
         min_distance = min(
             abs(pr - rr) + abs(pc - rc)
             for (rr, rc) in robot_positions
