@@ -428,7 +428,7 @@ class WateringProblem(search.Problem):
                             raw_dist = self.plant_bfs_maps[pos_v].get(pos_u, float('inf'))
                             
                         if raw_dist != float('inf'):
-                            weight = raw_dist // 2
+                            weight = raw_dist / 2.0
                             
                     if weight < min_dists[v]:
                         min_dists[v] = weight
