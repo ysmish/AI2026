@@ -16,39 +16,87 @@ class WateringProblem(search.Problem):
 
     def __init__(self, initial):
         """ Constructor only needs the initial state. """
-        # 1. Store "Static" map data in self. 
         self.size = initial["Size"]
         self.walls = frozenset(initial.get("Walls", set()))
         self.plants_targets = dict(initial["Plants"])
         self.robots_capacities = self._extract_robot_capacities(initial["Robots"])
         
-        # Sorted tuples for consistent indexing
         self.plant_positions = tuple(sorted(frozenset(initial["Plants"].keys())))
         self.tap_positions = tuple(sorted(frozenset(initial["Taps"].keys())))
 
         # --- PRE-CALCULATION FOR HEURISTIC & PRUNING ---
-        # Calculate full BFS distance map for every plant to every VALID cell.
         self.plant_bfs_maps = {}
         for p_pos in self.plant_positions:
             self.plant_bfs_maps[p_pos] = self._bfs_map(p_pos)
         
-        # Calculate full BFS distance map for every TAP
         self.tap_bfs_maps = {}
         for t_pos in self.tap_positions:
             self.tap_bfs_maps[t_pos] = self._bfs_map(t_pos)
+
+        # --- OPTIMIZATION: RELAXED STATIC MAP PRUNING ---
+        robot_starts = set((r, c) for (r, c, _, _) in initial["Robots"].values())
         
+        # Calculate BFS from robot start positions to check initial connectivity
+        self.start_bfs_maps = {}
+        for pos in robot_starts:
+            # Avoid re-calculating if start is on a plant/tap
+            if pos not in self.plant_bfs_maps and pos not in self.tap_bfs_maps:
+                self.start_bfs_maps[pos] = self._bfs_map(pos)
+
+        valid_cells = set()
+        
+        def get_dist_map(p):
+            if p in self.plant_bfs_maps: return self.plant_bfs_maps[p]
+            if p in self.tap_bfs_maps: return self.tap_bfs_maps[p]
+            return self.start_bfs_maps.get(p)
+
+        sources = robot_starts | set(self.plant_positions) | set(self.tap_positions)
+        destinations = set(self.plant_positions) | set(self.tap_positions)
+
+        # TOLERANCE: Allow paths slightly longer than optimal to let robots step aside.
+        # K=0 is strict shortest path. K=6 allows a 3-step detour (e.g. step out, wait, step back).
+        TOLERANCE = 6 
+
+        for src in sources:
+            d_map_src = get_dist_map(src)
+            if not d_map_src: continue 
+            
+            for dst in destinations:
+                if src == dst: continue
+                if dst not in d_map_src: continue
+                
+                shortest_dist = d_map_src[dst]
+                d_map_dst = get_dist_map(dst)
+
+                # Check all reachable cells
+                for cell, d_from_src in d_map_src.items():
+                    d_from_dst = d_map_dst.get(cell)
+                    
+                    if d_from_dst is not None:
+                        # If this cell is part of a path <= shortest + TOLERANCE, keep it.
+                        if d_from_src + d_from_dst <= shortest_dist + TOLERANCE:
+                            valid_cells.add(cell)
+
+        # Block cells NOT in valid_cells
+        if valid_cells: 
+            new_walls = set(self.walls)
+            for r in range(self.size[0]):
+                for c in range(self.size[1]):
+                    if (r, c) not in self.walls and (r, c) not in valid_cells:
+                        new_walls.add((r, c))
+            self.walls = frozenset(new_walls)
+        # --- END OPTIMIZATION ---
+
         # 2. Initialize dynamic values.
         robot_states = self._build_robot_states(initial["Robots"])
         plant_states = self._build_plant_states(initial["Plants"])
         tap_states = self._build_tap_states(initial["Taps"])
         
-        # Calculate total water needed globally
         total_remaining = sum(initial["Plants"].values())
 
         # State is: (robot_states, plant_states, tap_states, total_remaining)
         initial_state = (robot_states, plant_states, tap_states, total_remaining)
         search.Problem.__init__(self, initial_state)
-
     def _bfs_map(self, start_pos):
         """Runs BFS to find shortest path from start_pos to all NON-WALL cells."""
         queue = [(start_pos, 0)]
@@ -104,6 +152,7 @@ class WateringProblem(search.Problem):
             robot_id, r, c, load = robot_entry
 
             # --- 1. BLOCKING CHECK ---
+            # Check if this robot is adjacent to any other robot
             occupied = {
                 (or_r, or_c)
                 for (oid, or_r, or_c, _) in robot_states
@@ -116,40 +165,43 @@ class WateringProblem(search.Problem):
                     is_blocking = True
                     break
 
-            # --- 2. MANDATORY POUR OPTIMIZATION ---
-            if load > 0 and (r, c) in self.plant_positions and not is_blocking:
-                pidx = self.plant_positions.index((r, c))
-                if plant_states[pidx] < self.plants_targets[(r, c)]:
-                    successors.extend(
-                        self._get_pour_successor(robot_states, plant_states, tap_states, total_remaining,
-                                                 robot_entry, robot_id, r, c, load)
-                    )
-                    continue 
+            # --- 2. IDENTIFY POTENTIAL ACTIONS (LOAD / POUR) ---
+            possible_actions = []
 
-            # --- 3. MANDATORY LOAD OPTIMIZATION ---
-            if load < self.robots_capacities[robot_id] and (r, c) in self.tap_positions and not is_blocking:
-                tidx = self.tap_positions.index((r, c))
-                if tap_states[tidx] > 0 and total_remaining > current_total_load:
-                    successors.extend(
+            # Check POUR
+            if load > 0 and (r, c) in self.plant_positions:
+                 possible_actions.extend(
+                    self._get_pour_successor(robot_states, plant_states, tap_states, total_remaining,
+                                             robot_entry, robot_id, r, c, load)
+                 )
+
+            # Check LOAD
+            # We only load if we have space AND the global goal requires more water
+            if load < self.robots_capacities[robot_id] and (r, c) in self.tap_positions:
+                if total_remaining > current_total_load:
+                    possible_actions.extend(
                         self._get_load_successor(robot_states, plant_states, tap_states, total_remaining,
                                                  robot_entry, robot_id, r, c, load)
                     )
-                    continue
 
-            # --- 4. STANDARD EXPANSION (Fallback) ---
+            # --- 3. APPLY OPTIMIZATION: ACTION PRIORITY ---
+            # "If action performed, skip move unless robot is blocking another robot"
+            if possible_actions:
+                successors.extend(possible_actions)
+                
+                if not is_blocking:
+                    # If we can act and we aren't in anyone's way, DO NOT generate moves.
+                    # This prunes the search tree significantly.
+                    continue 
+                
+                # If we ARE blocking, we added the actions above, 
+                # but we ALSO fall through to generate moves below 
+                # (so the robot can step aside if necessary).
+
+            # --- 4. MOVES (Standard Expansion) ---
             successors.extend(
                 self._get_movement_successors(robot_states, plant_states, tap_states, total_remaining,
                                               robot_entry, robot_id, r, c, load, occupied)
-            )
-
-            successors.extend(
-                self._get_load_successor(robot_states, plant_states, tap_states, total_remaining,
-                                         robot_entry, robot_id, r, c, load)
-            )
-
-            successors.extend(
-                self._get_pour_successor(robot_states, plant_states, tap_states, total_remaining,
-                                         robot_entry, robot_id, r, c, load)
             )
 
         return successors
