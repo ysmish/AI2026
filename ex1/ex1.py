@@ -428,7 +428,7 @@ class WateringProblem(search.Problem):
                             raw_dist = self.plant_bfs_maps[pos_v].get(pos_u, float('inf'))
                             
                         if raw_dist != float('inf'):
-                            weight = raw_dist / 1.5
+                            weight = raw_dist/1.5
                             
                     if weight < min_dists[v]:
                         min_dists[v] = weight
@@ -438,26 +438,68 @@ class WateringProblem(search.Problem):
     def h_gbfs(self, node):
         state = node.state
         robot_states, plant_states, _, total_remaining = state
-        remaining = total_remaining
-        if remaining == 0: return 0
         
-        unsatisfied = [
-            pos
-            for i, pos in enumerate(self.plant_positions)
+        # Priority 1: If we are done, cost is 0
+        if total_remaining == 0: return 0
+        
+        # Priority 2: Use "Remaining" as the primary tier. 
+        # Multiply by a large constant so GBFS always prefers states 
+        # where water was just delivered.
+        base_score = total_remaining * 100
+        
+        # Identify urgent targets
+        unsatisfied_plants = [
+            pos for i, pos in enumerate(self.plant_positions)
             if plant_states[i] < self.plants_targets.get(pos, 0)
         ]
         
-        if not unsatisfied: return remaining
-        
-        robot_positions = [(rr, rc) for (_, rr, rc, _) in robot_states]
-        if not robot_positions: return remaining
+        if not unsatisfied_plants: return base_score
 
-        min_distance = min(
-            abs(pr - rr) + abs(pc - rc)
-            for (rr, rc) in robot_positions
-            for (pr, pc) in unsatisfied
-        )
-        return remaining + min_distance
+        # Priority 3: Find the minimum "Effort" required for the NEXT delivery.
+        # We don't care about total optimality, just the fastest next step.
+        min_effort = float('inf')
+        
+        for (_, r, c, load) in robot_states:
+            r_pos = (r, c)
+            
+            # CASE A: Robot has water -> Check distance to plants
+            if load > 0:
+                for p_pos in unsatisfied_plants:
+                    # USE BFS MAP (Real Distance), NOT MANHATTAN
+                    dist = self.plant_bfs_maps[p_pos].get(r_pos, float('inf'))
+                    if dist < min_effort:
+                        min_effort = dist
+            
+            # CASE B: Robot is empty -> Check distance to Tap -> Plant
+            else:
+                # 1. Find closest Tap to Robot
+                dist_to_tap = float('inf')
+                best_t_pos = None
+                
+                for t_pos in self.tap_positions:
+                    d = self.tap_bfs_maps[t_pos].get(r_pos, float('inf'))
+                    if d < dist_to_tap:
+                        dist_to_tap = d
+                        best_t_pos = t_pos
+                
+                # 2. If reachable, add distance from that Tap to closest Plant
+                if dist_to_tap != float('inf'):
+                    dist_tap_to_plant = float('inf')
+                    for p_pos in unsatisfied_plants:
+                        # Distance from Plant -> Tap
+                        d = self.plant_bfs_maps[p_pos].get(best_t_pos, float('inf'))
+                        if d < dist_tap_to_plant:
+                            dist_tap_to_plant = d
+                    
+                    total_path = dist_to_tap + dist_tap_to_plant
+                    if total_path < min_effort:
+                        min_effort = total_path
+
+        # If robots are blocked (effort is inf), return a huge number
+        if min_effort == float('inf'):
+            return float('inf')
+
+        return base_score + min_effort
 
 def create_watering_problem(game):
     return WateringProblem(game)
