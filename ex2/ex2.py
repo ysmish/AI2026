@@ -16,7 +16,7 @@ _MOVES = {
 }
 
 # --- Configuration (tunable) ---
-RELIABILITY_THRESHOLD = 0.9
+RELIABILITY_THRESHOLD = 0.8
 SMALL_BOARD_AREA = 16
 LOAD_AVOID_STEPS = 3  # if remaining steps < this, avoid forcing LOAD actions
 
@@ -181,6 +181,13 @@ class WateringProblem(Problem):
         # Sort positions for deterministic behavior
         self.plant_positions = tuple(sorted(frozenset(initial["Plants"].keys())))
         self.tap_positions = tuple(sorted(frozenset(initial["Taps"].keys())))
+
+        # expected reward per plant (if provided in problem dict)
+        self.plants_reward = dict(initial.get("plants_reward", {}))
+        self.plant_expected_rewards = {}
+        for p_pos in self.plant_positions:
+            rewards = self.plants_reward.get(p_pos, [])
+            self.plant_expected_rewards[p_pos] = (sum(rewards) / len(rewards)) if rewards else 0.0
 
         # --- 2. Pre-Calculate BFS Maps ---
         self.plant_bfs_maps = {}
@@ -358,6 +365,51 @@ class WateringProblem(Problem):
                                               robot_entry, robot_id, r, c, load, occupied)
             )
 
+        # Fallback: choose a safe legal action instead of RESET to avoid resetting the game
+        def fallback_action(state_obj, preferred_robot_ids=None):
+            robots_t, plants_t, taps_t, total = state_obj
+            occupied = {(rr, cc) for (rrid, (rr, cc), l) in robots_t}
+            # prefer highest reliability robot among preferred_robot_ids, else any
+            probs_map = self.game.get_problem().get("robot_chosen_action_prob", {})
+            candidates = []
+            for (rid, (rpos_r, rpos_c), l) in robots_t:
+                if preferred_robot_ids is not None and rid not in preferred_robot_ids:
+                    continue
+                candidates.append((probs_map.get(rid, 0), rid, (rpos_r, rpos_c), l))
+            if not candidates:
+                # try any robot
+                for (rid, (rpos_r, rpos_c), l) in robots_t:
+                    candidates.append((probs_map.get(rid, 0), rid, (rpos_r, rpos_c), l))
+            if not candidates:
+                return "RESET"
+            # pick robot with highest reliability
+            candidates.sort(reverse=True)
+            for _, rid, (rpos_r, rpos_c), l in candidates:
+                pos = (rpos_r, rpos_c)
+                base_actions = self.game.applicable_actions.get(pos, [])
+                for a in base_actions:
+                    if a in ("UP", "DOWN", "LEFT", "RIGHT"):
+                        if a == "UP": t = (pos[0]-1, pos[1])
+                        elif a == "DOWN": t = (pos[0]+1, pos[1])
+                        elif a == "LEFT": t = (pos[0], pos[1]-1)
+                        else: t = (pos[0], pos[1]+1)
+                        # ensure not occupied by another robot
+                        if t in occupied and t != pos:
+                            continue
+                        return f"{a}({rid})"
+                # try LOAD/POUR if applicable
+                if "LOAD" in base_actions:
+                    # check tap and capacity
+                    taps_positions = {p for (p, w) in taps_t}
+                    if pos in taps_positions:
+                        cap = self.game.get_capacities().get(rid, 0)
+                        if l < cap:
+                            return f"LOAD({rid})"
+                if "POUR" in base_actions:
+                    plants_positions = {p for (p, need) in plants_t}
+                    if pos in plants_positions and l > 0:
+                        return f"POUR({rid})"
+            return "RESET"
         return successors
 
     def _get_movement_successors(self, robot_states, plant_states, tap_states, total_remaining,
@@ -526,7 +578,15 @@ class WateringProblem(Problem):
                             raw_dist = self.plant_bfs_maps[pos_v].get(pos_u, float('inf'))
                             
                         if raw_dist != float('inf'):
-                            weight = raw_dist / 1.5
+                            # bias distances by expected reward: higher EV -> lower effective weight
+                            reward_factor = 1.0
+                            # if pos_u is a plant, include its expected reward
+                            if (not is_robot_u) and pos_u in self.plant_expected_rewards:
+                                reward_factor *= (1.0 + float(self.plant_expected_rewards.get(pos_u, 0.0)))
+                            # if pos_v is a plant, include its expected reward
+                            if (not is_robot_v) and pos_v in self.plant_expected_rewards:
+                                reward_factor *= (1.0 + float(self.plant_expected_rewards.get(pos_v, 0.0)))
+                            weight = raw_dist / (1.5 * reward_factor)
                             
                     if weight < min_dists[v]:
                         min_dists[v] = weight
@@ -585,6 +645,7 @@ class Controller:
             self.plan_idx = 0
             self.prev_state = None
             self.last_action = None
+            self.consecutive_pour_failures = 0
             self.stupid_robots = set()
 
         # Helper: build problem dict for A* from current game problem and a subset of robots and plants
@@ -615,22 +676,50 @@ class Controller:
                 "Walls": base.get("Walls", set()),
                 "Taps": taps_dict,
                 "Plants": plants_dict,
+                "plants_reward": base.get("plants_reward", {}),
                 "Robots": robots_dict,
             }
             return prob
 
         # Helper: pick chosen robots according to probabilities
         probs = self.game.get_problem().get("robot_chosen_action_prob", {})
-        # derive robot ids from state
-        robot_ids = [rid for (rid, (r, c), load) in state[0]]
+        # derive robot ids from state (all) and active (non-zero prob)
+        robot_ids_all = [rid for (rid, (r, c), load) in state[0]]
+        active_robot_ids = [rid for rid in robot_ids_all if float(probs.get(rid, 0.0)) > 0.0]
 
-        chosen = [rid for rid in robot_ids if probs.get(rid, 0) > RELIABILITY_THRESHOLD]
-        if not chosen:
-            # choose single robot with highest prob
-            best = max(robot_ids, key=lambda x: probs.get(x, 0))
-            chosen = [best]
+        if active_robot_ids:
+            chosen = [rid for rid in active_robot_ids if probs.get(rid, 0) >= RELIABILITY_THRESHOLD]
+            if not chosen:
+                # choose single active robot with highest prob
+                best = max(active_robot_ids, key=lambda x: probs.get(x, 0))
+                chosen = [best]
+            else:
+                # Last-resort: ensure plants have a nearby robot available for planning.
+                # If a plant's nearest robot isn't in `chosen`, add that robot (even
+                # if its reliability is below RELIABILITY_THRESHOLD) so we can plan
+                # using the geographically-appropriate agent as a fallback.
+                try:
+                    # get robot positions from current state
+                    robot_pos_map = {rid: (rpos_r, rpos_c) for (rid, (rpos_r, rpos_c), l) in state[0]}
+                    for (p_pos, need) in state[1]:
+                        # find nearest robot to this plant
+                        best_r = None; best_d = float('inf')
+                        for rid in robot_pos_map:
+                            rp = robot_pos_map[rid]
+                            d = bfs_dist(rp, [p_pos]).get(p_pos, float('inf'))
+                            if d < best_d:
+                                best_d = d; best_r = rid
+                        if best_r is not None and best_r not in chosen:
+                            # include even low-prob robots as last resort (if reachable)
+                            if not math.isinf(best_d):
+                                chosen.append(best_r)
+                except Exception:
+                    pass
+        else:
+            # no active robots (all have 0 prob) -> fall back to using all robots
+            chosen = [max(robot_ids_all, key=lambda x: probs.get(x, 0))]
 
-        stupid = set(robot_ids) - set(chosen)
+        stupid = set(robot_ids_all) - set(chosen)
 
         horizon = self.game.get_problem().get("horizon", 0)
         remaining_steps = self.game.get_max_steps() - self.game.get_current_steps()
@@ -647,6 +736,58 @@ class Controller:
             prob_dict = build_problem_from_state(state, chosen, plants_to_keep)
             actions = self.a_star(prob_dict)
             return actions
+
+        # Run A* with an explicit chosen set of robots
+        def run_astar_with_chosen(chosen_set, plants_to_keep=None):
+            prob_dict = build_problem_from_state(state, chosen_set, plants_to_keep)
+            actions = self.a_star(prob_dict)
+            return actions
+
+        # Local fallback: choose a safe legal action instead of RESET
+        def fallback_local(preferred_robot_ids=None):
+            robots_t, plants_t, taps_t, total = state
+            occupied = {(rr, cc) for (rrid, (rr, cc), l) in robots_t}
+            probs_map = self.game.get_problem().get("robot_chosen_action_prob", {})
+            candidates = []
+            # prefer active robots (non-zero prob)
+            preferred_pool = []
+            for (rid, (rpos_r, rpos_c), l) in robots_t:
+                if float(probs_map.get(rid, 0.0)) > 0.0:
+                    preferred_pool.append((rid, (rpos_r, rpos_c), l))
+
+            iters = preferred_pool if preferred_pool else [(rid, pos, l) for (rid, pos, l) in robots_t]
+            for (rid, (rpos_r, rpos_c), l) in iters:
+                if preferred_robot_ids is not None and rid not in preferred_robot_ids:
+                    continue
+                candidates.append((probs_map.get(rid, 0), rid, (rpos_r, rpos_c), l))
+            if not candidates:
+                return "RESET"
+            candidates.sort(reverse=True)
+            taps_positions = {p for (p, w) in taps_t}
+            plants_positions = {p for (p, need) in plants_t}
+            for _, rid, (rpos_r, rpos_c), l in candidates:
+                pos = (rpos_r, rpos_c)
+                base_actions = self.game.applicable_actions.get(pos, [])
+                occ_others = {(rr, cc) for (rrid, (rr, cc), _) in robots_t if rrid != rid}
+                # Prefer POUR when on a plant and have load
+                if "POUR" in base_actions and pos in plants_positions and l > 0:
+                    return f"POUR({rid})"
+                # Then prefer LOAD when on a tap and have capacity
+                if "LOAD" in base_actions and pos in taps_positions:
+                    cap = self.game.get_capacities().get(rid, 0)
+                    if l < cap:
+                        return f"LOAD({rid})"
+                # Finally try safe movements
+                for a in base_actions:
+                    if a in ("UP", "DOWN", "LEFT", "RIGHT"):
+                        if a == "UP": t = (pos[0]-1, pos[1])
+                        elif a == "DOWN": t = (pos[0]+1, pos[1])
+                        elif a == "LEFT": t = (pos[0], pos[1]-1)
+                        else: t = (pos[0], pos[1]+1)
+                        if t in occ_others:
+                            continue
+                        return f"{a}({rid})"
+            return "RESET"
 
         # Prepare plant pruning candidate list (sorted by expected reward ascending)
         plants_reward = self.game.get_problem().get("plants_reward", {})
@@ -847,7 +988,7 @@ class Controller:
                         converted.append(a)
                 self.plan_actions = converted
                 self.plan_idx = 0
-                self.stupid_robots = set(robot_ids) - set(chosen)
+                self.stupid_robots = set(robot_ids_all) - set(chosen)
                 # fall through to normal action return
 
         # iterative try: prune 0, then remove 1/3, 2/3 etc until threshold satisfied
@@ -872,7 +1013,7 @@ class Controller:
                     self.plan_idx = 0
                     self.prev_state = state
                     self.last_action = None
-                    return "RESET"
+                    return fallback_local(chosen)
                 continue
 
             plan_len = len(actions)
@@ -901,10 +1042,36 @@ class Controller:
                 # fallback
                 converted.append(a)
 
+        # If we planned no POURs but plants remain, try planning with all robots
+        if current_plants:
+            has_pour = any((('POUR' in str(x)) or (x and x.upper().startswith('POUR'))) for x in converted)
+            if not has_pour:
+                all_active_rids = [rid for (rid, (r, c), load) in state[0] if float(probs.get(rid, 0.0)) > 0.0]
+                if all_active_rids:
+                    alt_actions = run_astar_with_chosen(all_active_rids, keep if 'keep' in locals() else None)
+                else:
+                    alt_actions = None
+                if alt_actions:
+                    # convert alt_actions similarly
+                    alt_converted = []
+                    for a in alt_actions:
+                        if a is None: continue
+                        if "{" in a and "}" in a:
+                            act, rid = a.split("{")
+                            rid = rid.strip("}")
+                            alt_converted.append(f"{act}({rid})")
+                        else:
+                            alt_converted.append(a)
+                    # if alternative contains POUR, adopt it
+                    if any((('POUR' in str(x)) or (x and x.upper().startswith('POUR'))) for x in alt_converted):
+                        converted = alt_converted
+
         # Save plan
         self.plan_actions = converted
         self.plan_idx = 0
         self.stupid_robots = stupid
+        if getattr(self.game, '_debug', False):
+            print(f"DEBUG PLAN chosen={chosen} stupid={list(self.stupid_robots)} plan={self.plan_actions}")
 
         # If we had a previous action, detect its success and react
         if self.prev_state is not None and self.last_action is not None:
@@ -967,6 +1134,22 @@ class Controller:
 
             if not success:
                 # handle failure: for MOVE, try to move back; for LOAD/POUR, retry same action
+                # update consecutive pour-failure counter
+                if t == 'POUR':
+                    self.consecutive_pour_failures = getattr(self, 'consecutive_pour_failures', 0) + 1
+                else:
+                    self.consecutive_pour_failures = 0
+
+                # if too many POUR failures in a row, consider RESET to recover
+                if getattr(self, 'consecutive_pour_failures', 0) >= 3:
+                    self.consecutive_pour_failures = 0
+                    # clear plan to force replanning and perform RESET as last resort
+                    self.plan_actions = []
+                    self.plan_idx = 0
+                    self.prev_state = state
+                    self.last_action = None
+                    return "RESET"
+
                 if t in ('UP', 'DOWN', 'LEFT', 'RIGHT') and rid is not None:
                     # try to move robot back to old position
                     if new_robot is not None and old_robot is not None:
@@ -1025,7 +1208,7 @@ class Controller:
                         # cannot retry
                         self.prev_state = state
                         self.last_action = None
-                        return "RESET"
+                        return fallback_local(chosen)
 
         # Normal case: return next planned action but validate applicability
         if self.plan_idx < len(self.plan_actions):
@@ -1075,6 +1258,12 @@ class Controller:
                             if rrid == blocker:
                                 bpos = (rpos_r, rpos_c); break
                         if bpos is not None:
+                            # If the blocker robot has very low reliability, avoid pushing it aside
+                            p_blocker = float(probs.get(blocker, 0.0))
+                            if p_blocker < 0.05:
+                                # don't attempt risky push-aside; skip this planned action
+                                self.plan_idx += 1
+                                return fallback_local(chosen)
                             base_actions = self.game.applicable_actions[bpos]
                             # occupied without the blocker itself
                             occ_without_blocker = {p for p in occupied if p != bpos}
@@ -1092,23 +1281,49 @@ class Controller:
                     # otherwise, just recompute later (skip returning blocked action)
                     # fallback: try next action in plan (advance) or reset
                     self.plan_idx += 1
-                    return "RESET"
+                    return fallback_local(chosen)
 
             # For POUR/LOAD ensure applicability in current dynamic state
             if act_name == 'POUR':
                 # must be on a plant and have load>0
                 plant_positions = {pos for (pos, need) in plants_t}
                 if robot_pos is None or robot_pos not in plant_positions or robot_load == 0:
+                    # If another robot is standing on a plant cell with load>0, use it to pour
+                    # prefer non-zero-prob robots for opportunistic POUR
+                    ordered = sorted(list(robots_t), key=lambda x: float(probs.get(x[0], 0.0)), reverse=True)
+                    for (other_rid, (or_r, or_c), ol) in ordered:
+                        if (or_r, or_c) in plant_positions and ol > 0 and float(probs.get(other_rid, 0.0)) > 0.0:
+                            self.prev_state = state
+                            self.last_action = f"POUR({other_rid})"
+                            return f"POUR({other_rid})"
+                    # fallback: allow zero-prob robots if nothing else
+                    for (other_rid, (or_r, or_c), ol) in ordered:
+                        if (or_r, or_c) in plant_positions and ol > 0:
+                            self.prev_state = state
+                            self.last_action = f"POUR({other_rid})"
+                            return f"POUR({other_rid})"
                     # invalid now; recompute
                     self.plan_idx += 1
-                    return "RESET"
+                    return fallback_local(chosen)
 
             if act_name == 'LOAD':
                 tap_positions = {pos for (pos, water) in taps_t}
                 cap = self.game.get_capacities().get(rid_target, 0)
                 if robot_pos is None or robot_pos not in tap_positions or robot_load >= cap:
+                    # If another robot is on a tap and can load, use it
+                    ordered = sorted(list(robots_t), key=lambda x: float(probs.get(x[0], 0.0)), reverse=True)
+                    for (other_rid, (or_r, or_c), ol) in ordered:
+                        if (or_r, or_c) in tap_positions and ol < self.game.get_capacities().get(other_rid, 0) and float(probs.get(other_rid, 0.0)) > 0.0:
+                            self.prev_state = state
+                            self.last_action = f"LOAD({other_rid})"
+                            return f"LOAD({other_rid})"
+                    for (other_rid, (or_r, or_c), ol) in ordered:
+                        if (or_r, or_c) in tap_positions and ol < self.game.get_capacities().get(other_rid, 0):
+                            self.prev_state = state
+                            self.last_action = f"LOAD({other_rid})"
+                            return f"LOAD({other_rid})"
                     self.plan_idx += 1
-                    return "RESET"
+                    return fallback_local(chosen)
 
             # If action is LOAD and few steps remain, avoid forcing LOAD
             if act_name == 'LOAD':
@@ -1116,7 +1331,7 @@ class Controller:
                 if remaining < LOAD_AVOID_STEPS:
                     # skip forcing a load now; recompute plan next tick
                     self.plan_idx += 1
-                    return "RESET"
+                    return fallback_local(chosen)
 
             # action seems okay; return it
             self.plan_idx += 1
@@ -1125,4 +1340,4 @@ class Controller:
             return act
 
         # No plan / exhausted
-        return "RESET"
+        return fallback_local(chosen)
