@@ -499,6 +499,49 @@ class WaterWorldGUI:
 # חלק 3: טעינת הקונפיגורציה
 # =============================================================================
 
+problem_new3_version2 = {
+    "Size": (10, 4),
+    "Walls": {
+        (0, 1),
+        (1, 1),
+        (2, 1),
+        (3, 1),
+        (4, 1),
+        (6, 1),
+        (7, 1),
+        (8, 1),
+        (9, 1),
+        (4, 2),
+        (4, 3),
+        (6, 2),
+        (6, 3),
+    },
+    # Tap on the left side, with enough water
+    "Taps": {
+        (5, 3): 20,
+    },
+    # Plants on the far right, all need water
+    "Plants": {
+        (0, 0): 10,  # upper-right corrido
+        (9, 0): 10,
+    },
+    # Single robot, small capacity → many long trips through the maze
+    "Robots": {
+        10: (2, 0, 0, 2),  # bottom-left area near the tap side
+        11: (7, 0, 0, 20),  # bottom-left area near the tap side
+    },
+    "robot_chosen_action_prob": {
+        10: 0.95,
+        11: 0.8,
+    },
+    "goal_reward": 9,
+    "plants_reward": {
+        (0, 0): [1, 3],
+        (9, 0): [1, 3],
+    },
+    "seed": 45,
+    "horizon": 50,
+}
 
 problem_new3_version3 = {
     "Size": (10, 4),

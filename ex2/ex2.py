@@ -657,11 +657,15 @@ class Controller:
             # Robots dict: id -> (r, c, load, cap)
             capacities = self.game.get_capacities()
 
+            # Use the dynamic walls we calculated earlier (includes stupid robots as walls)
+            current_walls_for_astar = set(dynamic_walls)
+
             robots_dict = {}
             for (rid, (r_pos_r, r_pos_c), load) in robots_t:
                 if rid in chosen_robot_ids:
                     cap = capacities.get(rid, 0)
                     robots_dict[rid] = (r_pos_r, r_pos_c, load, cap)
+                # Note: Stupid robots are already in current_walls_for_astar
 
             # Plants dict
             plants_dict = {}
@@ -673,7 +677,7 @@ class Controller:
 
             prob = {
                 "Size": base.get("Size"),
-                "Walls": base.get("Walls", set()),
+                "Walls": current_walls_for_astar,  # A* now sees the blockage
                 "Taps": taps_dict,
                 "Plants": plants_dict,
                 "plants_reward": base.get("plants_reward", {}),
@@ -720,6 +724,13 @@ class Controller:
             chosen = [max(robot_ids_all, key=lambda x: probs.get(x, 0))]
 
         stupid = set(robot_ids_all) - set(chosen)
+
+        # Calculate Dynamic Walls (Static Walls + Stupid Robots)
+        game_walls = set(self.game.get_problem().get("Walls", set()))
+        dynamic_walls = set(game_walls)
+        for (rid, (r, c), _) in state[0]:
+            if rid in stupid:
+                dynamic_walls.add((r, c))
 
         horizon = self.game.get_problem().get("horizon", 0)
         remaining_steps = self.game.get_max_steps() - self.game.get_current_steps()
@@ -799,10 +810,10 @@ class Controller:
             expected_rewards[pos] = (sum(rewards) / len(rewards)) if rewards else 0
 
         # Helper: BFS distance on the static map (respect walls)
-        def bfs_dist(start, targets):
+        def bfs_dist(start, targets, walls_to_use=None):
             # returns dict target->dist (inf if unreachable)
             size = self.game.get_problem().get("Size", (0, 0))
-            walls = set(self.game.get_problem().get("Walls", set()))
+            walls = walls_to_use if walls_to_use is not None else set(self.game.get_problem().get("Walls", set()))
             from collections import deque as _dq
             q = _dq()
             q.append((start, 0))
@@ -825,6 +836,60 @@ class Controller:
                 res[t] = dists.get(t, float('inf'))
             return res
 
+        # Helper: Get reachable plants from a start position
+        def get_reachable_plants(start_pos, plant_positions, walls):
+            """Returns a set of plant positions that are reachable from start_pos."""
+            size = self.game.get_problem().get("Size", (0, 0))
+            from collections import deque
+            q = deque([start_pos])
+            visited = {start_pos}
+            reachable = set()
+            
+            # Optimization: If start is already on a plant
+            if start_pos in plant_positions:
+                reachable.add(start_pos)
+            
+            while q:
+                r, c = q.popleft()
+                if (r, c) in plant_positions:
+                    reachable.add((r, c))
+                
+                # Standard BFS neighbors
+                for dr, dc in _MOVES.values():
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < size[0] and 0 <= nc < size[1]:
+                        if (nr, nc) not in walls and (nr, nc) not in visited:
+                            visited.add((nr, nc))
+                            q.append((nr, nc))
+            return reachable
+
+        # Filter plants: Remove blocked ones (only keep reachable plants)
+        # Get position of our smart robot(s)
+        smart_positions = []
+        for (rid, (r, c), _) in state[0]:
+            if rid in chosen:
+                smart_positions.append((r, c))
+        
+        # If we have smart robots, filter plants that are physically reachable
+        valid_plants = set(current_plants)
+        if smart_positions:
+            # Check reachability from any smart robot
+            all_reachable = set()
+            for smart_pos in smart_positions:
+                reachable_set = get_reachable_plants(smart_pos, set(current_plants), dynamic_walls)
+                all_reachable.update(reachable_set)
+            
+            # Intersect current plants with reachable ones
+            valid_plants = set(current_plants).intersection(all_reachable)
+            
+            # EDGE CASE: If NO plants are reachable (total blockage), 
+            # fall back to original list so we don't crash
+            if not valid_plants and current_plants:
+                valid_plants = set(current_plants)
+        
+        # Update current_plants to only include valid (reachable) plants
+        current_plants = list(valid_plants)
+
         # Expected-value-per-step estimator (approximate, uses robot reliability)
         def ev_per_step_for_pair(cur_state, rid, plant_pos):
             probs = self.game.get_problem().get("robot_chosen_action_prob", {})
@@ -845,13 +910,13 @@ class Controller:
             if not taps:
                 return 0.0
 
-            # distances
-            d_robot_to_plant = bfs_dist(robot_pos, [plant_pos]).get(plant_pos, float('inf'))
-            d_plant_to_taps = bfs_dist(plant_pos, taps)
+            # distances (use dynamic_walls to account for stupid robots)
+            d_robot_to_plant = bfs_dist(robot_pos, [plant_pos], dynamic_walls).get(plant_pos, float('inf'))
+            d_plant_to_taps = bfs_dist(plant_pos, taps, dynamic_walls)
             d_tap_to_plant = min(d_plant_to_taps.values()) if d_plant_to_taps else float('inf')
 
             # nearest tap from robot (for initial load if needed)
-            d_robot_to_taps = bfs_dist(robot_pos, taps)
+            d_robot_to_taps = bfs_dist(robot_pos, taps, dynamic_walls)
             d_robot_to_tap = min(d_robot_to_taps.values()) if d_robot_to_taps else float('inf')
 
             # unreachable checks
@@ -936,7 +1001,7 @@ class Controller:
                 taps = list(self.game.get_problem().get("Taps", {}).keys())
                 cand_tap_dist = {}
                 for p in candidates:
-                    dmap = bfs_dist(p, taps)
+                    dmap = bfs_dist(p, taps, dynamic_walls)
                     cand_tap_dist[p] = min(dmap.values()) if taps else float('inf')
                 min_tap = min(cand_tap_dist.values())
                 candidates = [p for p in candidates if cand_tap_dist[p] == min_tap]
@@ -945,7 +1010,7 @@ class Controller:
                     robots_positions = [pos for (rid, pos, l) in state[0]]
                     cand_robot_dist = {}
                     for p in candidates:
-                        dmap = bfs_dist(p, robots_positions)
+                        dmap = bfs_dist(p, robots_positions, dynamic_walls)
                         cand_robot_dist[p] = min(dmap.values()) if robots_positions else float('inf')
                     min_robot = min(cand_robot_dist.values())
                     candidates = [p for p in candidates if cand_robot_dist[p] == min_robot]
