@@ -1122,7 +1122,7 @@ problem_new4_version2 = {
     "horizon": 40,
 }
 
-PROBLEM_CONFIG = problem_pdf3
+PROBLEM_CONFIG = problem_new2_version4
 
 if __name__ == "__main__":
     status = "Loaded: Dummy (ex2.py not found)"
