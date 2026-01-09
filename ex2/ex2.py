@@ -7,6 +7,34 @@ import sys
 # Update with your ID
 id = ["216764803"]
 
+"""
+Key Features:
+- STATE-SPACE REDUCTION: Dynamically switches between WATER_ONE and WATER_ALL strategies based on board 
+  area (>16) or reward disparity (farming detection) to minimize A* complexity.
+- MULTI-TIERED SMART ROBOT SELECTION: Selects the lead agent by grouping reliability into 5% buckets 
+  and prioritizing Maximum Water Capacity, ensuring high-volume workers lead the mission.
+- REFINED MAX-MIN DISTANCE HEURISTIC: An admissible heuristic combining total water deficit with 
+  bottleneck plant detection (furthest distance from nearest worker) for efficient task prioritization.
+- STOCHASTIC DRIFT COMPENSATION: Implement "GPS-style" re-planning by tracking expected vs. actual 
+  coordinates; any slip triggers an immediate plan recalculation from the current actual position.
+- PHYSICAL OCCUPANCY & BLOCKER GUARD: Identifies when low-reliability robots obstruct paths or target 
+  tiles, dynamically treating them as temporary walls to force alternative route planning.
+- PROACTIVE STRATEGIC RESET: Triggers a RESET upon task completion if the initial starting position 
+  is closer to a tap than the current position, effectively teleporting the robot to save steps.
+- ADMISSIBLE TIE-BREAKING PENALTY: Uses a fractional Manhattan distance (dist / 100.0) in the A* cost function to provide directionality and prevent oscillation in corridors.
+- RELIABILITY-BASED AGENT FILTERING: Ignores robots below a 0.7 success probability in complex modes 
+  to reduce plan congestion and avoid wasting moves on high-risk actions.
+
+AI Usage:
+i worked on this code in VScode with co-pilot, and cursor. and have used Claude and gemini for the following:
+- implmenting my ideas and solutions
+- documantation
+- Syntax correction
+- code optimization
+
+I've consulated with Tamar Ben Yosef and we shared our ideas VERBALLY only.
+"""
+
 # Directions mapping
 _MOVES = {
     "UP": (-1, 0),
