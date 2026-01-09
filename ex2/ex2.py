@@ -7,7 +7,7 @@ import sys
 # Update with your ID
 id = ["216764803"]
 
-# Directions mapping for BFS and Planning
+# Directions mapping
 _MOVES = {
     "UP": (-1, 0),
     "DOWN": (1, 0),
@@ -165,8 +165,63 @@ class WateringProblem(Problem):
     def goal_test(self, state):
         return state[3] == 0
 
+    # ==============================================================================
+    # HEURISTIC V3 (REVERTED): Max-Min + Deficit
+    # This stable version fixes pdf2 (symmetry) and supports the "One Robot" strategy.
+    # ==============================================================================
     def h(self, node):
-        return node.state[3]
+        robot_states, plant_states, tap_states, total_remaining = node.state
+        
+        if total_remaining == 0:
+            return 0
+            
+        needy_plants = []
+        for i, pos in enumerate(self.plant_positions):
+            if plant_states[i] < self.plants_targets[pos]:
+                needy_plants.append(pos)
+        
+        if not needy_plants:
+            return 0
+
+        active_taps = [pos for i, pos in enumerate(self.tap_positions) if tap_states[i] > 0]
+        
+        def manhattan(p1, p2):
+            return abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
+
+        # Work Deficit: Rewards loading actions
+        total_current_load = sum(r[2] for r in robot_states)
+        water_deficit = max(0, total_remaining - total_current_load)
+        
+        # Max-Min Distance: Focuses on the BOTTLENECK plant
+        max_min_dist = 0
+        
+        for p_pos in needy_plants:
+            min_dist_to_this_plant = float('inf')
+            
+            for rid, (r, c), load in robot_states:
+                # Cost logic:
+                # If loaded: Distance to plant
+                # If empty: Distance to Tap + 1 (Load Cost) + Dist Tap to Plant
+                if load > 0:
+                    dist = manhattan((r, c), p_pos)
+                else:
+                    if not active_taps: 
+                        dist = 999
+                    else:
+                        d_tap = min(manhattan((r, c), t) for t in active_taps)
+                        d_plant = min(manhattan(t, p_pos) for t in active_taps)
+                        dist = d_tap + 1 + d_plant
+                
+                if dist < min_dist_to_this_plant:
+                    min_dist_to_this_plant = dist
+            
+            if min_dist_to_this_plant == float('inf'):
+                min_dist_to_this_plant = 999
+                
+            if min_dist_to_this_plant > max_min_dist:
+                max_min_dist = min_dist_to_this_plant
+
+        return total_remaining + water_deficit + max_min_dist
 
 class Controller:
     def __init__(self, game: ext_plant.Game):
@@ -180,12 +235,22 @@ class Controller:
         self.RELIABILITY_THRESHOLD = 0.7
         self.active_robots = {rid for rid, p in robot_probs.items() if p >= self.RELIABILITY_THRESHOLD}
         
-        # ONLY CHANGE: Capacity tie-breaker
         capacities = game.get_capacities()
+        
+        # ==========================================================================
+        # IMPROVED ROBOT SELECTION
+        # We bucket probabilities by 5% (0.05). If probs are similar, we pick the 
+        # robot with HIGHER CAPACITY. This prefers Robot 10 (Cap 5) over 11 (Cap 1).
+        # ==========================================================================
         self.smart_robot_id = max(
             robot_probs.keys(), 
-            key=lambda rid: (robot_probs[rid], capacities.get(rid, 0))
+            key=lambda rid: (
+                int(robot_probs[rid] / 0.05), # Priority 1: Reliability Bucket
+                capacities.get(rid, 0),       # Priority 2: Capacity
+                robot_probs[rid]              # Priority 3: Raw Probability tie-break
+            )
         )
+        
         if not self.active_robots:
             self.active_robots = {self.smart_robot_id}
         
@@ -211,7 +276,8 @@ class Controller:
         self.plan_index = 0
         self.blocked_robots_positions = set()
         self.unreachable_plants = set()
-        self.last_action_was_reset = True 
+        self.last_action_was_reset = True
+        self.expected_robot_pos = {}
         return "RESET"
 
     def _build_reduced_problem(self, state, pd):
@@ -220,7 +286,14 @@ class Controller:
         area = self.size[0] * self.size[1]
         
         self.strategy = "WATER_ALL"
-        if area > 16:
+        
+        rewards = list(plant_rews.values())
+        max_r = max(rewards) if rewards else 0
+        min_r = min(rewards) if rewards else 0
+        is_farming = (max_r > 2.0 * min_r + 2)
+        
+        # For Maps larger than 16 (4x4), default to targeting specific plants
+        if area > 16 or is_farming:
             self.strategy = "WATER_ONE"
 
         selected_plants = {}
@@ -244,18 +317,14 @@ class Controller:
         else:
             selected_plants = {p: n for p, n in plants_t if n > 0 and p not in self.unreachable_plants}
 
-        # Strategy for including robots in A* search
         if self.strategy == "WATER_ONE":
-            # Check if active robots have similar reliability (within 0.1)
-            robot_probs = [pd["robot_chosen_action_prob"][rid] for rid in self.active_robots]
-            prob_range = max(robot_probs) - min(robot_probs) if len(robot_probs) > 1 else 0
+            # Aggressive Filtering:
+            # If the smart robot is good, IGNORE others to prevent "weak" robots
+            # from stealing tasks in the plan.
+            target_rids = {self.smart_robot_id}
             
-            # If similar reliability, include all robots so A* picks by distance/capacity
-            # If different reliability, use only the smart robot
-            if prob_range <= 0.1 and len(self.active_robots) > 1:
-                target_rids = self.active_robots
-            else:
-                target_rids = {self.smart_robot_id}
+            # Only include others if they are VERY close in quality (Prob + Cap)
+            # But generally, for WATER_ONE, single-agent A* is fastest and safest.
         else:
             target_rids = self.active_robots
             
@@ -275,10 +344,36 @@ class Controller:
         if self.last_action_was_reset:
             self.active_plant_positions, self.initial_total_water_need = current_active_plants, total_water_need
             self.last_action_was_reset = False
+            self.expected_robot_pos = {}
+        
+        slipped = False
+        for rid in self.active_robots:
+            actual_pos = self._get_robot_position(rid, robots_t)
+            if rid in self.expected_robot_pos and actual_pos is not None:
+                expected_pos = self.expected_robot_pos[rid]
+                if actual_pos != expected_pos:
+                    slipped = True
+                    break
+        
+        if slipped:
+            self._recalculate_plan()
+            self.expected_robot_pos = {}
         
         if self.strategy == "WATER_ONE":
             if len(current_active_plants) < len(self.active_plant_positions):
                 return self._return_reset()
+            
+            rid = self.smart_robot_id
+            load = self._get_robot_load(rid, robots_t)
+            if load == 0:
+                pos = self._get_robot_position(rid, robots_t)
+                start_pos = self.game.get_problem()["Robots"][rid][0:2]
+                
+                dist_current = self._get_dist_to_nearest_tap(pos, taps_t)
+                dist_start = self._get_dist_to_nearest_tap(start_pos, taps_t)
+                
+                if dist_start < dist_current:
+                     return self._return_reset()
 
         while self.plan_index < len(self.current_plan):
             act_str = self.current_plan[self.plan_index]
@@ -289,6 +384,19 @@ class Controller:
                 self.plan_index += 1; continue
 
             if name in _MOVES:
+                is_at_tap = any(p == pos for p, w in taps_t)
+                if is_at_tap:
+                    cap = self.game.get_capacities()[rid]
+                    needed = cap
+                    if self.current_target_plant:
+                         p_need = next((n for p, n in plants_t if p == self.current_target_plant), cap)
+                         needed = min(cap, p_need)
+                    
+                    if load < needed:
+                         if self._is_action_legal("LOAD", pos, load, state, rid):
+                             self.expected_robot_pos[rid] = pos
+                             return f"LOAD({rid})"
+
                 target = self._get_target_position(pos, name)
                 blocker = self._get_robot_at_position(target, robots_t, exclude_id=rid)
                 
@@ -299,6 +407,11 @@ class Controller:
 
             if not self._is_action_legal(name, pos, load, state, rid):
                 self.plan_index += 1; continue
+
+            if name in _MOVES:
+                self.expected_robot_pos[rid] = self._get_target_position(pos, name)
+            else:
+                self.expected_robot_pos[rid] = pos
 
             self.plan_index += 1
             return f"{name}({rid})"
@@ -312,10 +425,22 @@ class Controller:
         f_pos, f_load = self._get_robot_position(f_rid, robots_t), self._get_robot_load(f_rid, robots_t)
         
         if self._is_action_legal(f_name, f_pos, f_load, state, f_rid):
+            if f_name in _MOVES:
+                self.expected_robot_pos[f_rid] = self._get_target_position(f_pos, f_name)
+            else:
+                self.expected_robot_pos[f_rid] = f_pos
+            
             self.plan_index = 1
             return f"{f_name}({f_rid})"
         
         return self._greedy_action(state)
+
+    def _get_dist_to_nearest_tap(self, pos, taps_t):
+        best = float('inf')
+        for t_pos, _ in taps_t:
+            d = self._bfs_distance(pos, t_pos, self.game.get_problem())
+            if d < best: best = d
+        return best
 
     def _is_action_legal(self, action_name, robot_pos, robot_load, state, robot_id):
         robots_t, plants_t, taps_t, _ = state
@@ -353,7 +478,9 @@ class Controller:
         rid = self.smart_robot_id
         pos, load = self._get_robot_position(rid, state[0]), self._get_robot_load(rid, state[0])
         for move in _MOVES:
-            if self._is_action_legal(move, pos, load, state, rid): return f"{move}({rid})"
+            if self._is_action_legal(move, pos, load, state, rid):
+                self.expected_robot_pos[rid] = self._get_target_position(pos, move)
+                return f"{move}({rid})"
         return self._return_reset()
 
     def _bfs_distance(self, start, end, problem_dict):
